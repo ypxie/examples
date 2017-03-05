@@ -11,7 +11,7 @@ import model
 parser = argparse.ArgumentParser(description='PyTorch PennTreeBank RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='./data/penn',
                     help='location of the data corpus')
-parser.add_argument('--model', type=str, default='LSTM',
+parser.add_argument('--model', type=str, default='RNN',
                     help='type of recurrent net (RNN_TANH, RNN_RELU, LSTM, GRU)')
 parser.add_argument('--emsize', type=int, default=200,
                     help='size of word embeddings')
@@ -25,13 +25,13 @@ parser.add_argument('--clip', type=float, default=0.5,
                     help='gradient clipping')
 parser.add_argument('--epochs', type=int, default=6,
                     help='upper epoch limit')
-parser.add_argument('--batch-size', type=int, default=20, metavar='N',
+parser.add_argument('--batch-size', type=int, default= 32, metavar='N',
                     help='batch size')
 parser.add_argument('--bptt', type=int, default=20,
                     help='sequence length')
 parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
-parser.add_argument('--cuda', action='store_true',
+parser.add_argument('--cuda', action='store_false',
                     help='use CUDA')
 parser.add_argument('--log-interval', type=int, default=200, metavar='N',
                     help='report interval')
@@ -41,6 +41,7 @@ args = parser.parse_args()
 
 # Set the random seed manually for reproducibility.
 torch.manual_seed(args.seed)
+
 if torch.cuda.is_available():
     if not args.cuda:
         print("WARNING: You have a CUDA device, so you should probably run with --cuda")
@@ -75,11 +76,21 @@ model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers
 if args.cuda:
     model.cuda()
 
-criterion = nn.CrossEntropyLoss()
+criterion = nn.functional.cross_entropy #nn.CrossEntropyLoss()
 
 ###############################################################################
 # Training code
 ###############################################################################
+
+def clip_gradient(model, clip):
+    """Computes a gradient clipping coefficient based on gradient norm."""
+    totalnorm = 0
+    for p in model.parameters():
+        modulenorm = p.grad.data.norm()
+        totalnorm += modulenorm ** 2
+    totalnorm = math.sqrt(totalnorm)
+    return min(1, args.clip / (totalnorm + 1e-6))
+
 
 def repackage_hidden(h):
     """Wraps hidden states in new Variables, to detach them from their history."""
@@ -108,23 +119,24 @@ def evaluate(data_source):
         hidden = repackage_hidden(hidden)
     return total_loss[0] / len(data_source)
 
-
 def train():
     total_loss = 0
     start_time = time.time()
     ntokens = len(corpus.dictionary)
-    hidden = model.init_hidden(args.batch_size)
+    #hidden = model.init_hidden(args.batch_size)
+
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
         data, targets = get_batch(train_data, i)
+        hidden = model.init_hidden(args.batch_size)
         hidden = repackage_hidden(hidden)
         model.zero_grad()
         output, hidden = model(data, hidden)
         loss = criterion(output.view(-1, ntokens), targets)
-        loss.backward()
+        loss.backward(retain_variables=True)
 
-        torch.nn.utils.clip_grad_norm(model.parameters(), args.clip)
+        clipped_lr = lr * clip_gradient(model, args.clip)
         for p in model.parameters():
-            p.data.add_(-lr, p.grad.data)
+            p.data.add_(-clipped_lr, p.grad.data)
 
         total_loss += loss.data
 
@@ -155,7 +167,6 @@ for epoch in range(1, args.epochs+1):
     if prev_val_loss and val_loss > prev_val_loss:
         lr /= 4
     prev_val_loss = val_loss
-
 
 # Run on test data and save the model.
 test_loss = evaluate(test_data)
